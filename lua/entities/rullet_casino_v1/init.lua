@@ -230,41 +230,28 @@ function ENT:PlayerLeft(ply)
 end
 
 net.Receive("RoulettePlaceBet", function(len, ply)
-    -- Получаем данные о ставке от клиента
     local amount = net.ReadUInt(32)
     local bet = net.ReadString()
     
-    -- Проверяем, что игрок может сделать ставку
+    -- Проверки валидности
     if not IsValid(ply) then return end
     
-    -- Проверяем, что игрок сидит за столом
     local tableEnt = ply:GetNWEntity("RouletteTable")
     if not IsValid(tableEnt) then
-        DarkRP.notify(ply, 1, 4, "Вы должны сидеть за столом, чтобы сделать ставку!")
+        DarkRP.notify(ply, 1, 4, "Вы должны сидеть за столом!")
         return
     end
 
-    -- Проверяем наличие денег
     if not ply:canAfford(amount) then
-        DarkRP.notify(ply, 1, 4, "У вас недостаточно денег!")
+        DarkRP.notify(ply, 1, 4, "Недостаточно денег!")
         return
     end
     
-    -- Проверяем, что ставка соответствует номиналу фишек
-    local validChip = false
-    for _, chipValue in pairs(CHIP_VALUES) do
-        if amount == chipValue then
-            validChip = true
-            break
-        end
-    end
-    
-    if not validChip then
-        DarkRP.notify(ply, 1, 4, "Ставка должна соответствовать номиналу фишек (1, 5, 10, 50, 100, 500, 1000)!")
+    if amount < 1 or amount > 1000 then
+        DarkRP.notify(ply, 1, 4, "Ставка должна быть от 1 до 1000")
         return
     end
     
-    -- Ищем данные о позиции ставки
     local betData
     for group, bets in pairs(POSITION) do
         if bets[bet] then
@@ -274,82 +261,88 @@ net.Receive("RoulettePlaceBet", function(len, ply)
     end
     
     if not betData then
-        DarkRP.notify(ply, 1, 4, "Неверная ставка!")
+        DarkRP.notify(ply, 1, 4, "Неверный тип ставки!")
         return
     end
     
-    -- Создаем фишку
-    local chip = ents.Create("prop_physics")
-    chip:SetModel(CHIP_MODEL)
+    -- Разбиваем сумму на фишки
+    local chipsToSpawn = BreakIntoChips(amount)
+    local firstChip = nil
+    local basePos = tableEnt:LocalToWorld(betData.pos)
+    local baseAng = tableEnt:LocalToWorldAngles(betData.ang or Angle(0,0,0))
     
-    -- Рассчитываем позицию и угол фишки
-    local worldPos = tableEnt:LocalToWorld(betData.pos)
-    local worldAng = tableEnt:LocalToWorldAngles(betData.ang or Angle(0, 0, 0))
-    
-    -- Добавляем случайный поворот для ставок на числа
-    if not POSITION["OUTSIDE BETS"][bet] and not POSITION["GREEN"][bet] then
-        worldAng:RotateAroundAxis(worldAng:Up(), math.random(-20, 20))
-        worldAng:RotateAroundAxis(worldAng:Forward(), math.random(-5, 5))
+    -- Создаем фишки с эффектом появления
+    for i, chipValue in ipairs(chipsToSpawn) do
+        timer.Simple((i-1)*0.05, function() -- Задержка для эффекта последовательного появления
+            if not IsValid(tableEnt) then return end
+            
+            local chip = ents.Create("prop_dynamic")
+            chip:SetModel(CHIP_MODEL)
+            
+            -- Позиция с учетом высоты стопки и случайного смещения
+            local pos = basePos + Vector(
+                math.Rand(-CHIP_OFFSET, CHIP_OFFSET),
+                math.Rand(-CHIP_OFFSET, CHIP_OFFSET),
+                (i-1) * CHIP_HEIGHT
+            )
+            
+            local ang = baseAng
+            ang:RotateAroundAxis(ang:Up(), math.Rand(-15, 15))
+            
+            chip:SetPos(pos)
+            chip:SetAngles(ang)
+            
+            -- Установка текстуры фишки
+            for texId, value in pairs(CHIP_VALUES) do
+                if chipValue == value then
+                    chip:SetSkin(texId)
+                    break
+                end
+            end
+            
+            chip:Spawn()
+            
+            -- Фиксация фишки
+            local phys = chip:GetPhysicsObject()
+            if IsValid(phys) then
+                phys:EnableMotion(false)
+            end
+            
+            -- Эффект появления (увеличение)
+            chip:SetModelScale(0.1, 0)
+            chip:SetModelScale(1, 0.2)
+            
+            -- Привязка к столу
+            chip:SetParent(tableEnt)
+            
+            -- Сохранение первой фишки
+            if i == 1 then
+                firstChip = chip
+            end
+            
+            -- Автоудаление
+            timer.Simple(30, function()
+                if IsValid(chip) then chip:Remove() end
+            end)
+        end)
     end
     
-    -- Устанавливаем позицию и угол
-    chip:SetPos(worldPos)
-    chip:SetAngles(worldAng)
-    
-    -- Устанавливаем номинал фишки (текстуру)
-    for texId, chipValue in pairs(CHIP_VALUES) do
-        if amount == chipValue then
-            chip:SetSkin(texId)
-            break
-        end
-    end
-    
-    -- Спавним фишку
-    chip:Spawn()
-    
-    -- Фиксируем физику фишки
-    local phys = chip:GetPhysicsObject()
-    if IsValid(phys) then
-        phys:EnableMotion(false)
-        phys:Sleep()
-    end
-    
-    -- Привязываем фишку к столу
-    chip:SetParent(tableEnt)
-    
-    -- Сохраняем информацию о ставке
-    chip:SetNWString("BetType", bet)
-    chip:SetNWInt("BetAmount", amount)
-    chip:SetNWEntity("BetOwner", ply)
-    
-    -- Списываем деньги с игрока
+    -- Списываем деньги
     ply:addMoney(-amount)
     
-    -- Удаляем фишку через 30 секунд (или после окончания раунда)
-    timer.Simple(30, function()
-        if IsValid(chip) then
-            chip:Remove()
-        end
-    end)
-    
-    -- Логируем ставку
-    DarkRP.notify(ply, 0, 4, string.format("Вы поставили %s на %s", DarkRP.formatMoney(amount), bet))
-    
-    -- Отправляем уведомление другим игрокам за столом
-    for otherPlayer, _ in pairs(tableEnt.Players or {}) do
-        if IsValid(otherPlayer) and otherPlayer ~= ply then
-            DarkRP.notify(otherPlayer, 3, 4, string.format("%s поставил %s на %s", ply:Nick(), DarkRP.formatMoney(amount), bet))
-        end
+    -- Сохраняем ставку
+    if IsValid(firstChip) then
+        tableEnt.PlayerBets = tableEnt.PlayerBets or {}
+        tableEnt.PlayerBets[ply] = tableEnt.PlayerBets[ply] or {}
+        table.insert(tableEnt.PlayerBets[ply], {
+            chip = firstChip,
+            amount = amount,
+            bet = bet,
+            allChips = chipsToSpawn
+        })
     end
     
-    -- Сохраняем информацию о ставке в таблице
-    tableEnt.PlayerBets = tableEnt.PlayerBets or {}
-    tableEnt.PlayerBets[ply] = tableEnt.PlayerBets[ply] or {}
-    table.insert(tableEnt.PlayerBets[ply], {
-        chip = chip,
-        amount = amount,
-        bet = bet
-    })
+    DarkRP.notify(ply, 0, 4, "Вы поставили "..DarkRP.formatMoney(amount).." на "..bet)
 end)
 
 function ENT:OnRemove()
