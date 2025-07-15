@@ -1,4 +1,4 @@
-  include('shared.lua')
+include('shared.lua')
 
 local rouletteFrame = nil
 local isInputFocused = false
@@ -13,6 +13,8 @@ local selectedBet = nil
 local customCameraEnabled = false
 local cameraPos, cameraAng
 local lastClickedBet = nil
+local currentChips = {} -- Таблица для хранения созданных фишек
+local lastSelectedBet = nil -- Последняя выбранная ставка
 
 -- Chip values and model
 local CHIP_VALUES = {
@@ -116,6 +118,71 @@ function ENT:Draw()
     self:DrawModel()
 end
 
+-- Объявляем функции заранее
+local RemoveCurrentChips, CreatePreviewChips
+
+-- Удаление текущих фишек предпросмотра
+RemoveCurrentChips = function()
+    for _, chip in pairs(currentChips) do
+        if IsValid(chip.model) then
+            chip.model:Remove()
+        end
+        if timer.Exists("ChipGrow_".._) then
+            timer.Remove("ChipGrow_".._)
+        end
+    end
+    currentChips = {}
+end
+
+-- Создание фишек для предпросмотра
+CreatePreviewChips = function(betName, amount)
+    -- Находим позицию для ставки
+    local betData
+    for group, bets in pairs(POSITION) do
+        if bets[betName] then
+            betData = bets[betName]
+            break
+        end
+    end
+    
+    if not betData then return end
+    
+    -- Разбиваем сумму на фишки
+    local chips = BreakIntoChips(amount)
+    
+    -- Создаем фишки
+    for i, chipValue in ipairs(chips) do
+        local chip = {
+            model = ClientsideModel(CHIP_MODEL, RENDERGROUP_OPAQUE),
+            baseAngle = Angle(0, 0, 0), -- Фиксированный угол
+            stackPos = i
+        }
+        
+        chip.model:SetNoDraw(true) -- Сначала не рисуем
+        
+        -- Установка текстуры фишки
+        for texId, value in pairs(CHIP_VALUES) do
+            if chipValue == value then
+                chip.model:SetSkin(texId)
+                break
+            end
+        end
+        
+        table.insert(currentChips, chip)
+        
+        -- Эффект появления
+        chip.model:SetModelScale(0.1)
+        chip.model:SetNoDraw(false)
+        
+        local scale = 0.1
+        timer.Create("ChipGrow_"..#currentChips, 0.01, 15, function()
+            if not IsValid(chip.model) then return end
+            scale = math.min(scale + 0.06, 1)
+            chip.model:SetModelScale(scale)
+        end)
+    end
+end
+
 local function DrawRoundedBoxExOutlined(radius, x, y, w, h, color, r1, r2, r3, r4, outlineWidth, outlineColor)
     draw.RoundedBoxEx(radius, x, y, w, h, outlineColor, r1, r2, r3, r4)
     
@@ -210,10 +277,19 @@ local function CreateRouletteBetSlider(parent)
                 selectedBet = nil -- Снимаем выделение
                 lastClickTime = 0
                 lastClickedBet = nil
+                RemoveCurrentChips() -- Удаляем фишки
             else
+                -- Если выбрана новая ставка, удаляем старые фишки
+                if selectedBet ~= name then
+                    RemoveCurrentChips()
+                end
+                
                 selectedBet = name -- Выделяем ставку
                 lastClickTime = currentTime
                 lastClickedBet = name
+                
+                -- Создаем визуальные фишки для предпросмотра
+                CreatePreviewChips(name, currentBetAmount)
             end
             
             betSlider.Update("") -- Обновляем список для перерисовки
@@ -228,7 +304,7 @@ local function CreateRouletteBetSlider(parent)
         if searchText == "" then
             CreateGroupHeader("OUTSIDE BETS")
             local outsideBetsOrder = {
-                "low (1to18)", "even", "on red", "on black", "odd",
+                "low (1to18)", "even", "on red", "on black", "odd", "high (10to36)",
                 "1-12 (1st dozen)", "13-24 (2st dozen)", "25-36 (3rd dozen)",
                 "1 line (2to1)", "2 line (2to1)", "3 line (2to1)"
             }
@@ -425,35 +501,16 @@ local function CreateNumberInput(parent, x, y, w, h)
     numberEntry.OnLoseFocus = function()
         isInputFocused = false
         parent:SetKeyboardInputEnabled(false)
-        local value = tonumber(numberEntry:GetText()) or currentBetAmount
-        
-        -- Проверяем, соответствует ли значение номиналу фишек
-        local valid = false
-        for _, chipValue in pairs(CHIP_VALUES) do
-            if value == chipValue then
-                valid = true
-                break
-            end
-        end
-        
-        if not valid then
-            -- Находим ближайшее допустимое значение
-            local closest = 1
-            local minDiff = math.huge
-            for _, chipValue in pairs(CHIP_VALUES) do
-                local diff = math.abs(value - chipValue)
-                if diff < minDiff then
-                    minDiff = diff
-                    closest = chipValue
-                end
-            end
-            
-            value = closest
-        end
-        
+        local value = tonumber(numberEntry:GetText()) or minBetAmount
         value = math.Clamp(math.floor(value), minBetAmount, maxBetAmount)
         currentBetAmount = value
         numberEntry:SetText(value)
+        
+        -- Обновляем фишки при изменении суммы
+        if selectedBet then
+            RemoveCurrentChips()
+            CreatePreviewChips(selectedBet, currentBetAmount)
+        end
     end
     
     numberEntry.OnEnter = function()
@@ -464,35 +521,12 @@ local function CreateNumberInput(parent, x, y, w, h)
         if value ~= "" then
             local num = tonumber(value)
             if num then
-                -- Проверяем, соответствует ли значение номиналу фишек
-                local valid = false
-                for _, chipValue in pairs(CHIP_VALUES) do
-                    if num == chipValue then
-                        valid = true
-                        break
-                    end
-                end
+                currentBetAmount = math.Clamp(math.floor(num), minBetAmount, maxBetAmount)
                 
-                if not valid then
-                    -- Находим ближайшее допустимое значение
-                    local closest = 1
-                    local minDiff = math.huge
-                    for _, chipValue in pairs(CHIP_VALUES) do
-                        local diff = math.abs(num - chipValue)
-                        if diff < minDiff then
-                            minDiff = diff
-                            closest = chipValue
-                        end
-                    end
-                    
-                    timer.Simple(0, function()
-                        if IsValid(self) then
-                            self:SetText(closest)
-                            currentBetAmount = closest
-                        end
-                    end)
-                else
-                    currentBetAmount = num
+                -- Обновляем фишки при изменении суммы
+                if selectedBet then
+                    RemoveCurrentChips()
+                    CreatePreviewChips(selectedBet, currentBetAmount)
                 end
             end
         end
@@ -637,21 +671,12 @@ net.Receive("RouletteShowHUD", function()
             hoverColor = COLORS.HOVER, outlineColor = COLORS.OUTLINE,
             round = true,
             clickFunc = function()
-                -- Находим предыдущее допустимое значение
-                local newValue = 1
-                for i = #CHIP_VALUES, 1, -1 do
-                    if CHIP_VALUES[i] < currentBetAmount then
-                        newValue = CHIP_VALUES[i]
-                        break
-                    end
-                end
-                
-                currentBetAmount = math.max(newValue, minBetAmount)
+                currentBetAmount = math.max(currentBetAmount - 1, minBetAmount)
                 numberEntry:SetText(currentBetAmount)
                 numberEntry:OnValueChange(currentBetAmount)
             end
         })
-
+        
         CreateButton(rouletteFrame, {
             x = 476.77, y = 741.88, w = 72.69, h = 72.69,
             text = "+", font = FONTS.ARIAL_MAX,
@@ -659,16 +684,7 @@ net.Receive("RouletteShowHUD", function()
             hoverColor = COLORS.HOVER, outlineColor = COLORS.OUTLINE,
             round = true,
             clickFunc = function()
-                -- Находим следующее допустимое значение
-                local newValue = 1000
-                for i = 1, #CHIP_VALUES do
-                    if CHIP_VALUES[i] > currentBetAmount then
-                        newValue = CHIP_VALUES[i]
-                        break
-                    end
-                end
-                
-                currentBetAmount = math.min(newValue, maxBetAmount)
+                currentBetAmount = math.min(currentBetAmount + 1, maxBetAmount)
                 numberEntry:SetText(currentBetAmount)
                 numberEntry:OnValueChange(currentBetAmount)
             end
@@ -686,38 +702,41 @@ net.Receive("RouletteShowHUD", function()
                     return
                 end
                 
-                -- Проверяем, достаточно ли у игрока денег
-                local canAfford = LocalPlayer():canAfford(currentBetAmount)
-                if not canAfford then
+                -- Проверка баланса
+                if not LocalPlayer():canAfford(currentBetAmount) then
                     notification.AddLegacy("You don't have enough money!", NOTIFY_ERROR, 5)
                     return
                 end
                 
-                -- Проверяем, что ставка соответствует номиналу фишек
-                local validChip = false
-                for _, chipValue in pairs(CHIP_VALUES) do
-                    if currentBetAmount == chipValue then
-                        validChip = true
-                        break
-                    end
-                end
-                
-                if not validChip then
-                    notification.AddLegacy("Bet amount must match chip value (1, 5, 10, 50, 100, 500, 1000)!", NOTIFY_ERROR, 5)
+                -- Проверка минимальной/максимальной ставки
+                if currentBetAmount < minBetAmount then
+                    notification.AddLegacy("Minimum bet is "..minBetAmount.."!", NOTIFY_ERROR, 5)
                     return
                 end
                 
-                -- Запрашиваем подтверждение
-                Derma_Query("Are you sure you want to bet " .. DarkRP.formatMoney(currentBetAmount) .. " on " .. selectedBet .. "?", 
-                    "Confirm Bet",
-                    "Yes", function()
-                        -- Отправляем ставку на сервер
+                if currentBetAmount > maxBetAmount then
+                    notification.AddLegacy("Maximum bet is "..maxBetAmount.."!", NOTIFY_ERROR, 5)
+                    return
+                end
+                
+                local chips = BreakIntoChips(currentBetAmount)
+                local betText = selectedBet.." ("
+                for i, v in ipairs(chips) do
+                    betText = betText..(i > 1 and " + " or "")..v
+                end
+                betText = betText..")"
+        
+                Derma_Query(
+                    "Вы уверены, что хотите поставить "..DarkRP.formatMoney(currentBetAmount).." на "..betText.."?",
+                    "Подтверждение ставки",
+                    "Да", function()
+                        -- Отправка ставки на сервер
                         net.Start("RoulettePlaceBet")
-                        net.WriteUInt(currentBetAmount, 32)
-                        net.WriteString(selectedBet)
+                            net.WriteUInt(currentBetAmount, 32)
+                            net.WriteString(selectedBet)
                         net.SendToServer()
                     end,
-                    "No", function() end
+                    "Нет", function() end
                 )
             end
         })
@@ -727,6 +746,8 @@ net.Receive("RouletteShowHUD", function()
         gui.EnableScreenClicker(true)
 
         rouletteFrame.OnClose = function()
+            RemoveCurrentChips() -- Удаляем все фишки
+            
             if IsValid(infoFrame) then
                 infoFrame:Close()
             end
@@ -773,6 +794,48 @@ net.Receive("RouletteCameraUpdate", function()
     if customCameraEnabled then
         cameraPos = net.ReadVector()
         cameraAng = net.ReadAngle()
+    end
+end)
+
+-- Хук для отрисовки фишек
+hook.Add("PostDrawOpaqueRenderables", "DrawRoulettePreviewChips", function()
+    if not IsValid(LocalPlayer()) then return end
+    
+    for _, chip in pairs(currentChips) do
+        if IsValid(chip.model) then
+            local pos, ang
+            
+            -- Получаем позицию и угол из таблицы ставок
+            if selectedBet then
+                local betData
+                for group, bets in pairs(POSITION) do
+                    if bets[selectedBet] then
+                        betData = bets[selectedBet]
+                        break
+                    end
+                end
+                
+                if betData then
+                    local tableEnt = LocalPlayer():GetNWEntity("RouletteTable")
+                    if IsValid(tableEnt) then
+                        pos = tableEnt:LocalToWorld(betData.pos)
+                        ang = tableEnt:LocalToWorldAngles(betData.ang or Angle(0,0,0))
+                        
+                        -- Добавляем смещение по Z для стопки фишек
+                        pos = pos + tableEnt:GetUp() * ((chip.stackPos-1) * CHIP_HEIGHT)
+                        
+                        -- Фиксированный угол (без вращения)
+                        ang = ang + chip.baseAngle
+                    end
+                end
+            end
+            
+            if pos and ang then
+                chip.model:SetPos(pos)
+                chip.model:SetAngles(ang)
+                chip.model:DrawModel()
+            end
+        end
     end
 end)
 
