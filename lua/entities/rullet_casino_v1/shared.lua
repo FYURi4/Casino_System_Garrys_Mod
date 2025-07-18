@@ -20,18 +20,24 @@ ENT.Purpose = ""
 
 ENT.Instructions = ""
 
-CHIP_HEIGHT = 0.15-- Высота одной фишки
-MAX_CHIP_STACK = 10 -- Максимальное количество фишек в стопке
+CHIP_HEIGHT = 0.15
+MAX_CHIP_STACK = 10 
 CHIP_OFFSET = 0.05
 
+ROUND_WAITING = 0
+ROUND_BETTING = 1
+ROUND_SPINNING = 2
+BETTING_TIME = 20 
+SPIN_TIME = 10
+
 CHIP_VALUES = {
-    [0] = 1,    -- Текстура 0 = фишка 1
-    [1] = 5,     -- Текстура 1 = фишка 5
-    [2] = 10,    -- Текстура 2 = фишка 10
-    [3] = 50,    -- Текстура 3 = фишка 50
-    [4] = 100,   -- Текстура 4 = фишка 100
-    [5] = 500,   -- Текстура 5 = фишка 500
-    [6] = 1000   -- Текстура 6 = фишка 1000
+    [0] = 1,   
+    [1] = 5,   
+    [2] = 10,  
+    [3] = 50,    
+    [4] = 100,  
+    [5] = 500,   
+    [6] = 1000   
 }
 
 CHIP_MODEL = "models/darkrpcasinoby3demc/fishka_casino.mdl"
@@ -98,17 +104,14 @@ POSITION = {
     }
 }
 
--- Функция для разбивки суммы на фишки
+local chipValues = {1000, 500, 100, 50, 10, 5, 1}
 function BreakIntoChips(amount)
     local chips = {}
-    local values = {1000, 500, 100, 50, 10, 5, 1} -- номиналы в порядке убывания
-    
-    for _, value in ipairs(values) do
+    for _, value in ipairs(chipValues) do
         while amount >= value do
             table.insert(chips, value)
             amount = amount - value
         end
     end
-    
     return chips
-end
+end 
