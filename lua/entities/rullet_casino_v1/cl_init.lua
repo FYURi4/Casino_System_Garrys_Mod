@@ -1,33 +1,45 @@
+-- CLIENT
+
 include('shared.lua')
 
-local rouletteFrame = nil
+local rouletteFrame, infoFrame
 local isInputFocused = false
-local lastClickTime = 0
 local currentBetAmount = 1
 local minBetAmount = 1
 local maxBetAmount = 1000
-local betStep = 1
-local ALL_BETS = {}
-local betSlider = {}
-local selectedBet = nil
+local selectedBet
 local customCameraEnabled = false
 local cameraPos, cameraAng
-local lastClickedBet = nil
-local currentChips = {} -- Таблица для хранения созданных фишек
-local lastSelectedBet = nil -- Последняя выбранная ставка
-
--- Chip values and model
+local currentChips = {}
+local roundTimeLeft = 0
+local isSpinning = false
+local smoothTimer = {
+    targetTime = 0,
+    currentDisplay = 0,
+    lastUpdate = 0
+}
+local CAMERA_OFFSET = Vector(6, -8.5, 58)
+local CAMERA_ANGLE = Angle(180, 180, 0)
+local WHEEL_OFFSET = Vector(5.96, 42.34, 43)
+local cameraTransition = {
+    active = false,
+    startTime = 0,
+    duration = 1.5,
+    startPos = Vector(0,0,0),
+    startAng = Angle(0,0,0),
+    targetPos = Vector(0,0,0),
+    targetAng = Angle(0,0,0)
+}
 local CHIP_VALUES = {
-    [0] = 1,    -- Текстура 0 = фишка 1
-    [1] = 5,     -- Текстура 1 = фишка 5
-    [2] = 10,    -- Текстура 2 = фишка 10
-    [3] = 50,    -- Текстура 3 = фишка 50
-    [4] = 100,   -- Текстура 4 = фишка 100
-    [5] = 500,   -- Текстура 5 = фишка 500
-    [6] = 1000   -- Текстура 6 = фишка 1000
+    [0] = 1,   
+    [1] = 5,   
+    [2] = 10,  
+    [3] = 50,  
+    [4] = 100,  
+    [5] = 500,   
+    [6] = 1000 
 }
 local CHIP_MODEL = "models/darkrpcasinoby3demc/fishka_casino.mdl"
-
 local COLORS = {
     MAIN = Color(14, 137, 190),
     OUTLINE = Color(14, 117, 190),
@@ -39,16 +51,14 @@ local COLORS = {
     ACCENT = Color(14, 122, 190),
     SEARCH_BG = Color(40, 42, 48, 0),
     SEARCH_OUTLINE = Color(62, 65, 74),
-    SELECTED = Color(60, 50, 50) -- Золотистый цвет для выделения
+    SELECTED = Color(60, 50, 50)
 }
-
 local FONTS = {
     MAGNETO_MAX = "MagnetoLogoMax",
     MAGNETO_MIN = "MagnetoLogoMin",
     ARIAL_MAX = "ArialMax",
     ARIAL_MIN = "ArialMin"
 }
-
 local function InitializeFonts()
     surface.CreateFont(FONTS.MAGNETO_MAX, {
         font = "Magneto",
@@ -56,7 +66,6 @@ local function InitializeFonts()
         weight = 2000,
         antialias = true,
     })
-
     surface.CreateFont(FONTS.MAGNETO_MIN, {
         font = "Magneto",
         size = 51,
@@ -64,14 +73,12 @@ local function InitializeFonts()
         antialias = true,
         extended = true,
     })
-
     surface.CreateFont(FONTS.ARIAL_MAX, {
         font = "Arial",
         size = 39.42,
         weight = 2000,
         antialias = true,
     })
-
     surface.CreateFont(FONTS.ARIAL_MIN, {
         font = "Arial",
         size = 20.94,
@@ -79,10 +86,18 @@ local function InitializeFonts()
         antialias = true,
     })
 end
-
+local function StartCameraTransition(targetPos, keepAngle)
+    if not IsValid(LocalPlayer()) then return end
+    
+    cameraTransition.startPos = cameraPos or LocalPlayer():EyePos()
+    cameraTransition.startAng = cameraAng or LocalPlayer():EyeAngles()
+    cameraTransition.targetPos = targetPos
+    cameraTransition.targetAng = keepAngle and cameraTransition.startAng or CAMERA_ANGLE -- Сохраняем текущий угол
+    cameraTransition.startTime = RealTime()
+    cameraTransition.active = true
+end
 local function InitializeAllBets()
     ALL_BETS = {}
-    
     for betName, _ in pairs(POSITION["OUTSIDE BETS"]) do
         table.insert(ALL_BETS, {
             name = betName,
@@ -90,13 +105,11 @@ local function InitializeAllBets()
             color = COLORS.BG_DARKER
         })
     end
-    
     table.insert(ALL_BETS, {
         name = "0",
         group = "GREEN",
         color = Color(50, 200, 50)
     })
-    
     for betName, _ in pairs(POSITION["BLACK"]) do
         table.insert(ALL_BETS, {
             name = betName,
@@ -104,7 +117,6 @@ local function InitializeAllBets()
             color = Color(50, 50, 50)
         })
     end
-    
     for betName, _ in pairs(POSITION["RED"]) do
         table.insert(ALL_BETS, {
             name = betName,
@@ -121,46 +133,35 @@ end
 -- Объявляем функции заранее
 local RemoveCurrentChips, CreatePreviewChips
 
--- Удаление текущих фишек предпросмотра
-RemoveCurrentChips = function()
+local function RemoveCurrentChips()
     for _, chip in pairs(currentChips) do
         if IsValid(chip.model) then
             chip.model:Remove()
         end
-        if timer.Exists("ChipGrow_".._) then
-            timer.Remove("ChipGrow_".._)
-        end
+        timer.Remove("ChipGrow_".._)
     end
     currentChips = {}
 end
 
--- Создание фишек для предпросмотра
-CreatePreviewChips = function(betName, amount)
-    -- Находим позицию для ставки
-    local betData
+local function CreatePreviewChips(betName, amount)
+    local betData = nil
     for group, bets in pairs(POSITION) do
         if bets[betName] then
             betData = bets[betName]
             break
         end
     end
-    
     if not betData then return end
-    
-    -- Разбиваем сумму на фишки
+
     local chips = BreakIntoChips(amount)
-    
-    -- Создаем фишки
     for i, chipValue in ipairs(chips) do
         local chip = {
             model = ClientsideModel(CHIP_MODEL, RENDERGROUP_OPAQUE),
-            baseAngle = Angle(0, 0, 0), -- Фиксированный угол
+            baseAngle = Angle(0, 0, 0),
             stackPos = i
         }
         
-        chip.model:SetNoDraw(true) -- Сначала не рисуем
-        
-        -- Установка текстуры фишки
+        chip.model:SetNoDraw(true)
         for texId, value in pairs(CHIP_VALUES) do
             if chipValue == value then
                 chip.model:SetSkin(texId)
@@ -169,16 +170,15 @@ CreatePreviewChips = function(betName, amount)
         end
         
         table.insert(currentChips, chip)
-        
-        -- Эффект появления
         chip.model:SetModelScale(0.1)
         chip.model:SetNoDraw(false)
         
         local scale = 0.1
         timer.Create("ChipGrow_"..#currentChips, 0.01, 15, function()
-            if not IsValid(chip.model) then return end
-            scale = math.min(scale + 0.06, 1)
-            chip.model:SetModelScale(scale)
+            if IsValid(chip.model) then
+                scale = math.min(scale + 0.06, 1)
+                chip.model:SetModelScale(scale)
+            end
         end)
     end
 end
@@ -550,12 +550,9 @@ net.Receive("RouletteShowHUD", function()
     local show = net.ReadBool()
     
     if show then
-        if IsValid(rouletteFrame) then
-            rouletteFrame:Close()
-        end
-        if IsValid(infoFrame) then
-            infoFrame:Close()
-        end
+        
+        if IsValid(rouletteFrame) then rouletteFrame:Close() end
+        if IsValid(infoFrame) then infoFrame:Close() end
 
         -- Основной фрейм
         rouletteFrame = vgui.Create("DFrame")
@@ -614,11 +611,26 @@ net.Receive("RouletteShowHUD", function()
             DrawRoundedBoxExOutlined(10, 0, 57, 337.56, 51.74, COLORS.BG_DARK, false, false, true, false, 3, COLORS.SEARCH_OUTLINE)
             DrawRoundedBoxExOutlined(10, 336, 7, 337.56, 51.74, COLORS.BG_DARKER, false, true, false, false, 3, COLORS.SEARCH_OUTLINE)
             DrawRoundedBoxExOutlined(10, 336, 57, 337.56, 51.74, COLORS.BG_DARK, false, false, false, true, 3, COLORS.SEARCH_OUTLINE)
-
-            draw.SimpleText("END OF BETTING:",FONTS.ARIAL_MAX,27, 33.5,COLORS.TEXT_WHITE,TEXT_ALIGN_LEFT,TEXT_ALIGN_CENTER)
-            draw.SimpleText("0:00",FONTS.ARIAL_MAX, 160, 82,COLORS.TEXT_WHITE,TEXT_ALIGN_CENTER,TEXT_ALIGN_CENTER)
-
-            draw.SimpleText("YOUR ACCOUNT:",FONTS.ARIAL_MAX,365, 33.5,COLORS.TEXT_WHITE,TEXT_ALIGN_LEFT,TEXT_ALIGN_CENTER)
+        
+            draw.SimpleText("END OF BETTING:", FONTS.ARIAL_MAX, 27, 33.5, COLORS.TEXT_WHITE, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
+            
+            -- Отображаем таймер
+            local displayTime = math.max(0, math.Round(roundTimeLeft))
+            local minutes = math.floor(displayTime / 60)
+            local seconds = displayTime % 60
+            
+            draw.SimpleText(
+                string.format("%d:%02d", minutes, seconds), 
+                FONTS.ARIAL_MAX, 
+                160, 
+                82, 
+                COLORS.TEXT_WHITE, 
+                TEXT_ALIGN_CENTER, 
+                TEXT_ALIGN_CENTER
+            )
+            
+            draw.SimpleText("YOUR ACCOUNT:", FONTS.ARIAL_MAX, 365, 33.5, COLORS.TEXT_WHITE, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
+            
             local money = LocalPlayer():getDarkRPVar("money") or 0
             local formattedMoney = DarkRP.formatMoney(money)
             draw.SimpleText(formattedMoney, FONTS.ARIAL_MAX, 505, 82, COLORS.TEXT_WHITE, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
@@ -746,31 +758,68 @@ net.Receive("RouletteShowHUD", function()
         gui.EnableScreenClicker(true)
 
         rouletteFrame.OnClose = function()
-            RemoveCurrentChips() -- Удаляем все фишки
-            
-            if IsValid(infoFrame) then
-                infoFrame:Close()
-            end
+            RemoveCurrentChips()
             gui.EnableScreenClicker(false)
             rouletteFrame = nil
-            infoFrame = nil
             isInputFocused = false
             selectedBet = nil
+            -- Не закрываем infoFrame здесь
         end
         
         infoFrame.OnClose = function()
             if IsValid(rouletteFrame) then
                 rouletteFrame:Close()
             end
+            infoFrame = nil
         end
         
     elseif IsValid(rouletteFrame) then
         rouletteFrame:Close()
-        if IsValid(infoFrame) then
-            infoFrame:Close()
-        end
+        rouletteFrame = nil
     end
 end)
+
+net.Receive("RouletteUpdateTimer", function()
+    smoothTimer.targetTime = net.ReadUInt(16)
+    smoothTimer.lastUpdate = RealTime()
+end)
+
+net.Receive("RouletteStartSpin", function()
+    local hideOnlyRoulette = net.ReadBool()
+    
+    if hideOnlyRoulette and IsValid(rouletteFrame) then
+        rouletteFrame:Close()
+    end
+    
+    isSpinning = true
+    
+    local tableEnt = LocalPlayer():GetNWEntity("RouletteTable")
+    if IsValid(tableEnt) then
+        local wheelPos = tableEnt:GetPos() + 
+                        tableEnt:GetForward() * WHEEL_OFFSET.x + 
+                        tableEnt:GetRight() * WHEEL_OFFSET.y + 
+                        tableEnt:GetUp() * WHEEL_OFFSET.z
+        
+        -- Только смещение позиции, угол не меняется
+        StartCameraTransition(wheelPos, true)
+    end
+end)
+
+net.Receive("RouletteEndSpin", function()
+    isSpinning = false
+    
+    local tableEnt = LocalPlayer():GetNWEntity("RouletteTable")
+    if IsValid(tableEnt) then
+        local targetPos = tableEnt:GetPos() + 
+                         tableEnt:GetForward() * CAMERA_OFFSET.x + 
+                         tableEnt:GetRight() * CAMERA_OFFSET.y + 
+                         tableEnt:GetUp() * CAMERA_OFFSET.z
+        
+        -- Возврат к исходной позиции с сохранением угла
+        StartCameraTransition(targetPos, true)
+    end
+end)
+
 
 hook.Add("PlayerButtonDown", "RouletteCloseOnE", function(ply, button)
     if button == KEY_E and (IsValid(rouletteFrame) or IsValid(infoFrame)) and not isInputFocused then
@@ -846,8 +895,21 @@ hook.Add("CalcView", "RouletteCustomCamera", function(ply, pos, ang, fov)
             origin = cameraPos,
             angles = cameraAng,
             fov = fov,
-            drawviewer = true -- Показывать модель игрока
+            drawviewer = true
         }
+        
+        if cameraTransition.active then
+            local progress = math.Clamp((RealTime() - cameraTransition.startTime) / cameraTransition.duration, 0, 1)
+            view.origin = LerpVector(progress, cameraTransition.startPos, cameraTransition.targetPos)
+            view.angles = LerpAngle(progress, cameraTransition.startAng, cameraTransition.targetAng)
+            
+            if progress >= 1 then
+                cameraTransition.active = false
+                cameraPos = cameraTransition.targetPos
+                cameraAng = cameraTransition.targetAng
+            end
+        end
+        
         return view
     end
 end)
@@ -855,4 +917,41 @@ end)
 -- Хук для отключения камеры при смерти или других ситуациях
 hook.Add("PlayerDeath", "RouletteCameraReset", function(ply)
     customCameraEnabled = false
+end)
+
+hook.Add("Think", "UpdateRouletteTimer", function()
+    if IsValid(infoFrame) then
+        infoFrame:InvalidateLayout() -- Принудительное обновление
+    end
+end)
+
+hook.Add("Think", "SmoothTimerUpdate", function()
+    local now = RealTime()
+    local delta = now - smoothTimer.lastUpdate
+    
+    if delta < 1 then
+        local diff = smoothTimer.targetTime - smoothTimer.currentDisplay
+        smoothTimer.currentDisplay = smoothTimer.currentDisplay + diff * FrameTime() * 5
+    else
+        smoothTimer.currentDisplay = smoothTimer.targetTime
+    end
+    
+    roundTimeLeft = math.Round(smoothTimer.currentDisplay)
+    
+    -- Запускаем переход камеры, когда таймер достигает 0
+    if roundTimeLeft <= 0 and not cameraTransition.active and not isSpinning then
+        isSpinning = true
+        
+        local tableEnt = LocalPlayer():GetNWEntity("RouletteTable")
+        if IsValid(tableEnt) then
+            local wheelPos = tableEnt:GetPos() + tableEnt:GetForward() * WHEEL_OFFSET.x + 
+                            tableEnt:GetRight() * WHEEL_OFFSET.y + 
+                            tableEnt:GetUp() * (WHEEL_OFFSET.z + 10)
+            
+            local wheelAng = tableEnt:GetAngles()
+            wheelAng:RotateAroundAxis(wheelAng:Right(), -30)
+            
+            StartCameraTransition(wheelPos, wheelAng)
+        end
+    end
 end)
