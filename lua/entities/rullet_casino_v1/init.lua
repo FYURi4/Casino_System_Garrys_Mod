@@ -1,17 +1,16 @@
--- sv_init.lua
-
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
-
 
 util.AddNetworkString("RoulettePlaceBet")
 util.AddNetworkString("RouletteShowHUD")
 util.AddNetworkString("RoulettePlayerSat")
 util.AddNetworkString("RoulettePlayerLeft")
 util.AddNetworkString("RouletteCameraUpdate")
+util.AddNetworkString("RouletteUpdateTimer")
+util.AddNetworkString("RouletteStartSpin")
+util.AddNetworkString("RouletteEndSpin")
 
--- Hooks for sitting/unsitting players
 hook.Add("PlayerEnteredVehicle", "Roulette_PlayerSat", function(ply, veh)
     if not (IsValid(veh) and IsValid(ply)) then return end
     if veh:GetNWBool("IsRouletteChair", false) then
@@ -32,12 +31,10 @@ hook.Add("PlayerLeaveVehicle", "Roulette_PlayerLeft", function(ply, veh)
     end
 end)
 
-
-local CAMERA_OFFSET = Vector(6, -8.5, 58) -- Смещение камеры относительно стола
-local CAMERA_ANGLE = Angle(90, 180, 0) -- Угол камеры (настроить по вкусу)
+local CAMERA_OFFSET = Vector(6, -8.5, 58) 
+local CAMERA_ANGLE = Angle(90, 180, 0) 
 local ROUND_WAITING = 0
 
--- Constants
 local CHAIR_OFFSETS = {
     { pos = Vector(50, 13, 6.5), ang = Angle(0, 0, 0), addAng = Angle(0, 90, 0) },  
     { pos = Vector(50, -24, 6.5), ang = Angle(0, 0, 0), addAng = Angle(0, 90, 0) },    
@@ -61,34 +58,161 @@ function ENT:Initialize()
     local phys = self:GetPhysicsObject()
     if IsValid(phys) then phys:EnableMotion(false) end
 
-    self.RoundState = ROUND_WAITING
-    self.BettingEndTime = 0
+    -- Инициализация состояния игры
+    self.RoundState = ROUND_BETTING
+    self.BettingEndTime = CurTime() + BETTING_TIME
+    self.SpinEndTime = 0
+    self.WinningNumber = nil
     self.Players = {}
+    self.PlayerBets = {}
 
     self:CreateChairs()
     self:CreateGMan()
     self:CreateWheel()
     self:CreateBall()
+
+    self.LastSentTime = BETTING_TIME -- Добавьте это
+    self:StartRoundTimer()
+end
+
+function ENT:StartRoundTimer()
+    local lastUpdate = CurTime()
+    
+    timer.Create("RouletteRoundTimer_"..self:EntIndex(), 0.1, 0, function() -- Уменьшили интервал до 0.1 сек
+        if not IsValid(self) then 
+            timer.Remove("RouletteRoundTimer_"..self:EntIndex()) 
+            return 
+        end
+        
+        local currentTime = CurTime()
+        if currentTime - lastUpdate >= 1 then -- Отправляем обновление ровно раз в секунду
+            lastUpdate = currentTime
+            
+            if self.RoundState == ROUND_BETTING then
+                local timeLeft = math.max(0, math.floor(self.BettingEndTime - currentTime))
+                
+                -- Отправляем только если время изменилось
+                if timeLeft ~= self.LastSentTime then
+                    self.LastSentTime = timeLeft
+                    
+                    for ply, _ in pairs(self.Players) do
+                        if IsValid(ply) then
+                            net.Start("RouletteUpdateTimer")
+                                net.WriteUInt(timeLeft, 16)
+                            net.Send(ply)
+                        end
+                    end
+                end
+                
+                if timeLeft <= 0 then
+                    self:StartSpinning()
+                end
+            end
+        end
+    end)
+end
+
+function ENT:StartSpinning()
+    self.RoundState = ROUND_SPINNING
+    self.SpinEndTime = CurTime() + SPIN_TIME
+    
+    -- Отправляем клиентам команду скрыть только интерфейс ставок
+    for ply, _ in pairs(self.Players) do
+        if IsValid(ply) then
+            net.Start("RouletteStartSpin")
+                net.WriteBool(true) -- true = скрыть только rouletteFrame
+            net.Send(ply)
+        end
+    end
+    
+    -- Выбираем случайное число (0-36)
+    self.WinningNumber = math.random(0, 36)
+    
+    -- Запускаем анимацию вращения
+    timer.Simple(SPIN_TIME, function()
+        if IsValid(self) then
+            self:FinishRound()
+        end
+    end)
+end
+function ENT:FinishRound()
+    -- Выплачиваем выигрыши
+    for ply, bets in pairs(self.PlayerBets or {}) do
+        if IsValid(ply) then
+            local totalWin = 0
+            -- ... логика расчета выигрыша ...
+        end
+    end
+    
+    -- Очищаем ставки
+    self.PlayerBets = {}
+    
+    -- Начинаем новый раунд
+    self.RoundState = ROUND_BETTING
+    self.BettingEndTime = CurTime() + BETTING_TIME
+    
+    -- Уведомляем клиентов о конце вращения
+    for ply, _ in pairs(self.Players) do
+        if IsValid(ply) then
+            net.Start("RouletteEndSpin")
+            net.Send(ply)
+            
+            -- Показываем интерфейс ставок
+            net.Start("RouletteShowHUD")
+                net.WriteBool(true)
+            net.Send(ply)
+        end
+    end
+end
+
+function ENT:IsWinningBet(bet, number)
+    -- Логика проверки выигрышных ставок
+    if bet == tostring(number) then return true end
+    
+    if bet == "0" and number == 0 then return true end
+    
+    if bet == "on red" then
+        local redNumbers = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+        return table.HasValue(redNumbers, number)
+    end
+    
+    if bet == "on black" then
+        local blackNumbers = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
+        return table.HasValue(blackNumbers, number)
+    end
+    
+    -- Добавьте проверки для других типов ставок...
+    
+    return false
+end
+
+function ENT:GetBetMultiplier(bet)
+    -- Возвращаем множитель для разных типов ставок
+    if tonumber(bet) then return 35 end -- Прямая ставка
+    if bet == "0" then return 35 end
+    
+    -- Добавьте множители для других типов ставок...
+    
+    return 1
 end
 
 function ENT:CreateChairs()
     self.Chairs = {}
     for i, offset in ipairs(CHAIR_OFFSETS) do
-        local chairPos = self:GetPos() + self:GetForward() * offset.pos.x + self:GetRight() * offset.pos.y + self:GetUp() * offset.pos.z
+        local chairPos = self:GetPos() + self:GetForward() * offset.pos.x + 
+                        self:GetRight() * offset.pos.y + self:GetUp() * offset.pos.z
+        
         local seat = ents.Create("prop_vehicle_prisoner_pod")
         seat:SetModel("models/nova/airboat_seat.mdl")
-        seat:SetKeyValue("vehiclescript", "")
         seat:SetPos(chairPos)
         seat:SetAngles(self:GetAngles() + offset.ang + offset.addAng)
         seat:Spawn()
         seat:SetParent(self)
-
         seat:SetNoDraw(true)
-        seat:SetColor(Color(0, 0, 0, 0))
-        seat:SetRenderMode(RENDERMODE_TRANSALPHA)
-        seat:SetCollisionGroup(COLLISION_GROUP_WEAPON)
         seat:SetNWEntity("RouletteTable", self)
         seat:SetNWBool("IsRouletteChair", true)
+
+        seat:setKeysNonOwnable(true)
 
         local chair = ents.Create("prop_dynamic")
         chair:SetModel("models/darkrpcasinoby3demc/chair_co.mdl")
@@ -96,7 +220,6 @@ function ENT:CreateChairs()
         chair:SetAngles(self:GetAngles() + offset.ang)
         chair:SetParent(seat)
         chair:Spawn()
-        chair:DrawShadow(false)
 
         self.Chairs[i] = seat
         self:DeleteOnRemove(seat)
@@ -105,7 +228,7 @@ function ENT:CreateChairs()
 end
 
 function ENT:CreateGMan()
-    -- GMan
+    
     self.GMan = ents.Create("npc_gman")
     if IsValid(self.GMan) then
         local localOffset = GMAN_OFFSET
@@ -120,23 +243,19 @@ function ENT:CreateGMan()
         self.GMan:Spawn()
         self.GMan:Activate()
 
-        -- Установка состояния NPC
         self.GMan:SetNPCState(NPC_STATE_SCRIPT)
         self.GMan:SetSolid(SOLID_NONE)
-        self.GMan:SetMoveType(MOVETYPE_NONE) -- NPC теперь "заморожен"
+        self.GMan:SetMoveType(MOVETYPE_NONE) 
         self.GMan:SetHealth(99999)
         self.GMan:SetMaxHealth(99999)
         self.GMan:SetSchedule(SCHED_IDLE_STAND)
         self.GMan:AddRelationship("player D_LI 99")
         self.GMan:CapabilitiesAdd(CAP_ANIMATEDFACE + CAP_TURN_HEAD)
 
-        -- Принудительно задать анимацию
         self.GMan:ResetSequence(self.GMan:LookupSequence("lineidle01"))
 
-        -- Родитель — стол
         self.GMan:SetParent(self)
 
-    
         self:DeleteOnRemove(self.GMan)
     end
 end
@@ -188,9 +307,8 @@ function ENT:PlayerSat(ply, chair)
     ply:SetNWEntity("RouletteChair", chair)
     ply:SetNWEntity("RouletteTable", self)
     
-    -- Отправляем данные о камере клиенту
     net.Start("RouletteCameraUpdate")
-        net.WriteBool(true) -- Включить камеру
+        net.WriteBool(true) 
         net.WriteVector(self.Players[ply].cameraPos)
         net.WriteAngle(self.Players[ply].cameraAng)
     net.Send(ply)
@@ -204,14 +322,12 @@ function ENT:PlayerSat(ply, chair)
     net.Send(ply)
 end
 
-
 function ENT:PlayerLeft(ply)
     if not (IsValid(ply) and ply:IsPlayer()) then return end
     
     if self.Players[ply] then
-        -- Отправляем команду отключить кастомную камеру
         net.Start("RouletteCameraUpdate")
-            net.WriteBool(false) -- Выключить камеру
+            net.WriteBool(false)
         net.Send(ply)
         
         self.Players[ply] = nil
@@ -233,7 +349,6 @@ net.Receive("RoulettePlaceBet", function(len, ply)
     local amount = net.ReadUInt(32)
     local bet = net.ReadString()
     
-    -- Проверки валидности
     if not IsValid(ply) then return end
     
     local tableEnt = ply:GetNWEntity("RouletteTable")
@@ -265,21 +380,18 @@ net.Receive("RoulettePlaceBet", function(len, ply)
         return
     end
     
-    -- Разбиваем сумму на фишки
     local chipsToSpawn = BreakIntoChips(amount)
     local firstChip = nil
     local basePos = tableEnt:LocalToWorld(betData.pos)
     local baseAng = tableEnt:LocalToWorldAngles(betData.ang or Angle(0,0,0))
     
-    -- Создаем фишки с эффектом появления
     for i, chipValue in ipairs(chipsToSpawn) do
-        timer.Simple((i-1)*0.05, function() -- Задержка для эффекта последовательного появления
+        timer.Simple((i-1)*0.05, function() 
             if not IsValid(tableEnt) then return end
             
             local chip = ents.Create("prop_dynamic")
             chip:SetModel(CHIP_MODEL)
             
-            -- Позиция с учетом высоты стопки и случайного смещения
             local pos = basePos + Vector(
                 math.Rand(-CHIP_OFFSET, CHIP_OFFSET),
                 math.Rand(-CHIP_OFFSET, CHIP_OFFSET),
@@ -292,7 +404,6 @@ net.Receive("RoulettePlaceBet", function(len, ply)
             chip:SetPos(pos)
             chip:SetAngles(ang)
             
-            -- Установка текстуры фишки
             for texId, value in pairs(CHIP_VALUES) do
                 if chipValue == value then
                     chip:SetSkin(texId)
@@ -302,35 +413,28 @@ net.Receive("RoulettePlaceBet", function(len, ply)
             
             chip:Spawn()
             
-            -- Фиксация фишки
             local phys = chip:GetPhysicsObject()
             if IsValid(phys) then
                 phys:EnableMotion(false)
             end
             
-            -- Эффект появления (увеличение)
             chip:SetModelScale(0.1, 0)
             chip:SetModelScale(1, 0.2)
             
-            -- Привязка к столу
             chip:SetParent(tableEnt)
             
-            -- Сохранение первой фишки
             if i == 1 then
                 firstChip = chip
             end
             
-            -- Автоудаление
             timer.Simple(30, function()
                 if IsValid(chip) then chip:Remove() end
             end)
         end)
     end
     
-    -- Списываем деньги
     ply:addMoney(-amount)
     
-    -- Сохраняем ставку
     if IsValid(firstChip) then
         tableEnt.PlayerBets = tableEnt.PlayerBets or {}
         tableEnt.PlayerBets[ply] = tableEnt.PlayerBets[ply] or {}
